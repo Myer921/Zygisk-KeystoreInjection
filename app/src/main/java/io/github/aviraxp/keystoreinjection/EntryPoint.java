@@ -1,9 +1,10 @@
 package io.github.aviraxp.keystoreinjection;
 
 import android.util.Log;
-
+import android.text.TextUtils;
 import org.bouncycastle.asn1.x500.X500Name;
-
+import org.json.JSONException;
+import org.json.JSONObject;
 import java.lang.reflect.Field;
 import java.security.KeyStore;
 import java.security.KeyStoreSpi;
@@ -14,10 +15,13 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Iterator;
 
 public final class EntryPoint {
     private static final Map<String, Keybox> certs = new HashMap<>();
     private static final Map<String, Certificate> store = new HashMap<>();
+    private static final Map<Field, String> map = new HashMap<>();
+    public static final String TAG = "KeystoreInjection";
 
     static {
         try {
@@ -29,7 +33,7 @@ public final class EntryPoint {
             CustomKeyStoreSpi.keyStoreSpi = (KeyStoreSpi) keyStoreSpi.get(keyStore);
 
         } catch (Throwable t) {
-            Log.e("KeystoreInjection", Log.getStackTraceString(t));
+            Log.e(TAG, "Couldn't get keyStoreSpi field!", t);
         }
 
         Provider provider = Security.getProvider("AndroidKeyStore");
@@ -67,8 +71,92 @@ public final class EntryPoint {
                         CertUtils.parsePrivateKey(privateKey), certificateChain, certificateChainHolders));
             }
         } catch (Throwable t) {
-            Log.e("KeystoreInjection", Log.getStackTraceString(t));
+            Log.e(TAG, Log.getStackTraceString(t));
         }
+    }
+
+    public static void receiveJson(String json) {
+        boolean spoofPackageManager = false;
+
+        JSONObject jsonObject = null;
+
+        try {
+            jsonObject = new JSONObject(json);
+        } catch (JSONException e) {
+            Log.e(TAG, "Can't parse json", e);
+        }
+
+        if (jsonObject == null || jsonObject.length() == 0) return;
+
+        Iterator<String> it = jsonObject.keys();
+
+        while (it.hasNext()) {
+            String key = it.next();
+
+            String value = "";
+            try {
+                value = jsonObject.getString(key);
+            } catch (JSONException e) {
+                Log.e(TAG, "Couldn't get value from key", e);
+            }
+
+            if (TextUtils.isEmpty(value)) continue;
+
+            if ("SPOOF_PACKAGE_MANAGER".equals(key) && Boolean.parseBoolean(value)) {
+                spoofPackageManager = true;
+                continue;
+            }
+
+            Field field = getFieldByName(key);
+
+            if (field == null) continue;
+
+            map.put(field, value);
+        }
+
+        Log.i(TAG, "Fields ready to spoof: " + map.size());
+
+        spoofFields();
+        if (spoofPackageManager) spoofPackageManager();
+    }
+
+    private static void spoofFields() {
+        map.forEach((field, s) -> {
+            try {
+                if (s.equals(field.get(null))) return;
+                field.setAccessible(true);
+                String oldValue = String.valueOf(field.get(null));
+                field.set(null, s);
+                Log.d(TAG, String.format("""
+                        ---------------------------------------
+                        [%s]
+                        OLD: '%s'
+                        NEW: '%s'
+                        ---------------------------------------
+                        """, field.getName(), oldValue, field.get(null)));
+            } catch (Throwable t) {
+                Log.e(TAG, "Error modifying field", t);
+            }
+        });
+    }
+
+    private static Field getFieldByName(String name) {
+        Field field;
+        try {
+            field = Build.class.getDeclaredField(name);
+        } catch (NoSuchFieldException e) {
+            try {
+                field = Build.VERSION.class.getDeclaredField(name);
+            } catch (NoSuchFieldException ex) {
+                return null;
+            }
+        }
+        field.setAccessible(true);
+        return field;
+    }
+
+    private static void spoofPackageManager() {
+        // 实现伪造 PackageManager 的代码
     }
 
     static void append(String a, Certificate c) {

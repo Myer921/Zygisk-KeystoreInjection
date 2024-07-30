@@ -11,6 +11,7 @@
 #define CLASSES_DEX "/data/adb/modules/keystoreinjection/classes.dex"
 #define APPLIST_FILE_PATH "/data/adb/keystoreinjection/targetlist"
 #define KEYBOX_FILE_PATH "/data/adb/keystoreinjection/keybox.xml"
+#define PIF_JSON "/data/adb/keystoreinjection/pif.json"
 
 ssize_t xread(int fd, void *buffer, size_t count) {
     ssize_t total = 0;
@@ -58,7 +59,6 @@ public:
     }
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
-        // Dex will be copied in memory so we can close module itself
         api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
 
         if (!args) return;
@@ -71,7 +71,6 @@ public:
 
         int fd = api->connectCompanion();
 
-        // Check target app and return earlier if not related
         long applistSize = 0;
         xread(fd, &applistSize, sizeof(long));
 
@@ -84,13 +83,11 @@ public:
         applistVector.resize(applistSize);
         xread(fd, applistVector.data(), applistSize);
 
-        // Generate split app list
         std::string applist(applistVector.begin(), applistVector.end());
-        std::vector<std::string> splitlist= split(applist);
+        std::vector<std::string> splitlist = split(applist);
 
-        // Find target app
         bool found = false;
-        for (const std::string& app : splitlist) {
+        for (const std::string &app : splitlist) {
             if (dir.ends_with(app)) {
                 found = true;
                 break;
@@ -102,13 +99,15 @@ public:
             return;
         }
 
-        long dexSize = 0, xmlSize = 0;
+        long dexSize = 0, xmlSize = 0, jsonSize = 0;
 
         xread(fd, &dexSize, sizeof(long));
         xread(fd, &xmlSize, sizeof(long));
+        xread(fd, &jsonSize, sizeof(long));
 
         LOGD("Dex file size: %ld", dexSize);
         LOGD("Xml file size: %ld", xmlSize);
+        LOGD("Json file size: %ld", jsonSize);
 
         if (dexSize < 1 || xmlSize < 1) {
             close(fd);
@@ -122,10 +121,19 @@ public:
         xmlVector.resize(xmlSize);
         xread(fd, xmlVector.data(), xmlSize);
 
+        if (jsonSize > 0) {
+            jsonVector.resize(jsonSize);
+            xread(fd, jsonVector.data(), jsonSize);
+        }
+
         close(fd);
 
         std::string xmlString(xmlVector.begin(), xmlVector.end());
         xml = xmlString;
+
+        if (!jsonVector.empty()) {
+            json = std::string(jsonVector.begin(), jsonVector.end());
+        }
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
@@ -141,7 +149,9 @@ private:
     zygisk::Api *api = nullptr;
     JNIEnv *env = nullptr;
     std::vector<uint8_t> dexVector;
+    std::vector<uint8_t> jsonVector;
     std::string xml;
+    std::string json;
 
     void injectDex() {
         LOGD("get system classloader");
@@ -169,11 +179,17 @@ private:
         auto receiveXml = env->GetStaticMethodID(entryPointClass, "receiveXml", "(Ljava/lang/String;)V");
         auto xmlString = env->NewStringUTF(xml.c_str());
         env->CallStaticVoidMethod(entryPointClass, receiveXml, xmlString);
+
+        if (!json.empty()) {
+            LOGD("receive json");
+            auto receiveJson = env->GetStaticMethodID(entryPointClass, "receiveJson", "(Ljava/lang/String;)V");
+            auto jsonString = env->NewStringUTF(json.c_str());
+            env->CallStaticVoidMethod(entryPointClass, receiveJson, jsonString);
+        }
     }
 };
 
 static std::vector<uint8_t> readFile(const char *path) {
-
     std::vector<uint8_t> vector;
 
     FILE *file = fopen(path, "rb");
@@ -194,15 +210,17 @@ static std::vector<uint8_t> readFile(const char *path) {
 }
 
 static void companion(int fd) {
-    std::vector<uint8_t> applistVector, dexVector, xmlVector;
+    std::vector<uint8_t> applistVector, dexVector, xmlVector, jsonVector;
 
     applistVector = readFile(APPLIST_FILE_PATH);
     dexVector = readFile(CLASSES_DEX);
     xmlVector = readFile(KEYBOX_FILE_PATH);
+    jsonVector = readFile(PIF_JSON);
 
     long applistSize = applistVector.size();
     long dexSize = dexVector.size();
     long xmlSize = xmlVector.size();
+    long jsonSize = jsonVector.size();
 
     xwrite(fd, &applistSize, sizeof(long));
     // Write applist earlier, so we can avoid reading dex for unrelated apps
@@ -210,9 +228,11 @@ static void companion(int fd) {
 
     xwrite(fd, &dexSize, sizeof(long));
     xwrite(fd, &xmlSize, sizeof(long));
+    xwrite(fd, &jsonSize, sizeof(long));
 
     xwrite(fd, dexVector.data(), dexSize);
     xwrite(fd, xmlVector.data(), xmlSize);
+    xwrite(fd, jsonVector.data(), jsonSize);
 }
 
 REGISTER_ZYGISK_MODULE(KeystoreInjection)
